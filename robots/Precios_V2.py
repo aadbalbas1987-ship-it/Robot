@@ -2,16 +2,29 @@ import pyautogui
 import time
 import pandas as pd
 import os
+import sys
 from utils import limpiar_sku, forzar_caps_off, f_monto
 
 def cargar_listado_hijos():
-    """Lee el archivo hijos.txt desde el escritorio."""
+    """Busca el archivo hijos.txt en la misma carpeta que el ejecutable o el script."""
     hijos = set()
-    ruta_txt = r'C:\Users\HP\Desktop\Suite\hijos.txt'
+    
+    # Esta línea detecta automáticamente dónde está parado el .exe
+    if getattr(sys, 'frozen', False):
+        # Si es el .exe
+        ruta_base = os.path.dirname(sys.executable)
+    else:
+        # Si es el código .py
+        ruta_base = os.path.dirname(os.path.abspath(__file__))
+        # Si el script está dentro de la carpeta 'robots', subimos un nivel
+        if "robots" in ruta_base:
+            ruta_base = os.path.dirname(ruta_base)
+
+    ruta_txt = os.path.join(ruta_base, 'hijos.txt')
+    
     try:
         if os.path.exists(ruta_txt):
-            with open(ruta_txt, 'r') as f:
-                # Limpiamos cada código de espacios y saltos de línea
+            with open(ruta_txt, 'r', encoding='utf-8') as f:
                 hijos = {line.strip() for line in f if line.strip()}
     except Exception:
         pass

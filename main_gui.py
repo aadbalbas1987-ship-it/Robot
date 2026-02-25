@@ -13,7 +13,6 @@ from dotenv import load_dotenv, set_key
 
 # --- IMPORTACIÓN DE MÓDULOS DE ROBOTS ---
 from robots.Robot_Putty import ejecutar_stock
-from robots.precios import ejecutar_precios
 from robots.ajuste import ejecutar_ajuste
 from robots.Cheques import ejecutar_cheques
 from robots.Precios_V2 import ejecutar_precios_v2
