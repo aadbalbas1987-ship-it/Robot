@@ -1,99 +1,93 @@
 import pyautogui
 import time
 import pandas as pd
-from utils import limpiar_sku, forzar_caps_off
+from utils import forzar_caps_off
 
 def ejecutar_stock(df, total, log_func, progress_func, velocidad):
     """
-    Versión Final Optimizada: Bucle continuo de artículos.
-    Secuencia: SKU -> 2 ENTER -> u+Cantidad -> 1 ENTER (salto al sig. SKU)
+    Robot de Carga de Stock (3-6-1).
+    Optimizado para ráfaga de carga y blindado contra errores de índice.
     """
     pyautogui.PAUSE = velocidad
     forzar_caps_off()
     
-    # 1. NAVEGACIÓN INICIAL AL MÓDULO (3-6-1)
+    if df.empty:
+        log_func("❌ ERROR: El archivo Excel no tiene datos.")
+        return False
+
+    # 1. NAVEGACIÓN INICIAL
     log_func("Entrando al módulo de stock (3-6-1)...")
     for k in ['3', '6', '1']:
-        pyautogui.write(k)
-        pyautogui.press('enter')
-        time.sleep(0.4)
+        pyautogui.write(k); pyautogui.press('enter')
+        time.sleep(0.5)
     
-    # 2. CARGA DE CABECERA (Columna C)
+    # 2. CARGA DE CABECERA (Columna C / Índice 2)
     try:
-        pedido = str(df.iloc[0, 2]).split('.')[0] if not pd.isna(df.iloc[0, 2]) else ""
-        obs = str(df.iloc[1, 2]) if not pd.isna(df.iloc[1, 2]) else ""
-        imp = str(df.iloc[2, 2]).upper() if not pd.isna(df.iloc[2, 2]) else "LP1"
+        # Extraemos Pedido (C1), Obs (C2), Impresora (C3)
+        pedido = str(df.iloc[0, 2]).split('.')[0].strip() if not pd.isna(df.iloc[0, 2]) else ""
+        obs    = str(df.iloc[1, 2]).strip() if not pd.isna(df.iloc[1, 2]) else ""
+        imp    = str(df.iloc[2, 2]).upper().strip() if not pd.isna(df.iloc[2, 2]) else "LP1"
         
         log_func(f"📌 Cabecera: Pedido {pedido} | Obs: {obs}")
 
-        pyautogui.write(pedido); pyautogui.press('enter'); time.sleep(0.7)
+        pyautogui.write(pedido); pyautogui.press('enter'); time.sleep(0.8)
         pyautogui.press('enter') 
-        pyautogui.write(obs); pyautogui.press('enter'); time.sleep(0.4)
+        pyautogui.write(obs); pyautogui.press('enter'); time.sleep(0.5)
         pyautogui.press('enter')
-        pyautogui.write(imp); pyautogui.press('enter'); time.sleep(1.0)
+        pyautogui.write(imp); pyautogui.press('enter'); time.sleep(1.2)
         
-        # Re-ingreso para entrar a la grilla de carga
-        pyautogui.write(pedido); pyautogui.press('enter'); time.sleep(1.2)
+        # Entrar a la grilla usando el número de pedido
+        pyautogui.write(pedido); pyautogui.press('enter'); time.sleep(1.5)
         
     except Exception as e:
         log_func(f"❌ Error en cabecera: {e}")
-        return
+        return False
 
-    # 3. BUCLE DE ARTÍCULOS (LOOP CONTINUO)
+    # 3. BUCLE DE ARTÍCULOS (RÁFAGA)
     log_func("⏳ Iniciando ráfaga de carga...")
     
     for i, row in df.iterrows():
-        val_sku = row[0]
+        # Tomamos SKU (Col A / 0) y Cantidad (Col B / 1)
+        val_sku = row.iloc[0]
         if pd.isna(val_sku): continue
         
-        # Saltamos encabezados
-        sku_str = str(val_sku).strip().lower()
-        if sku_str in ['codigo', 'sku', 'articulo', 'código', 'artículo']:
-            continue
-        
         try:
-            # Datos: A (SKU), B (Cantidad), D (Modo G)
             sku = str(val_sku).split('.')[0].strip()
-            cantidad = str(int(float(str(row[1]).strip()))) if not pd.isna(row[1]) else "0"
-            info_d = str(row[3]).strip() if len(row) > 3 and not pd.isna(row[3]) and str(row[3]).lower() != 'nan' else None
-
-            # --- RÁFAGA DENTRO DE LA GRILLA ---
-            # Escribir SKU
-            pyautogui.write(sku)
+            # Quitamos el .0 de las cantidades por si vienen de Excel
+            cantidad = str(int(float(str(row.iloc[1]).strip()))) if not pd.isna(row.iloc[1]) else "0"
             
-            # 2 ENTERS para llegar al campo de modo/unidad (según el nuevo menú)
+            # Lógica Modo G (Columna D / Índice 3)
+            info_d = str(row.iloc[3]).strip() if len(row) > 3 and not pd.isna(row.iloc[3]) and str(row.iloc[3]).lower() != 'nan' else None
+
+            # Escribir SKU y navegar a cantidad (4 enters)
+            pyautogui.write(sku)
             pyautogui.press('enter', presses=4, interval=0.1)
 
             if info_d:
-                # MODO G (Pesables)
+                # MODO G (Pesable / Galpón)
                 pyautogui.write('g')
-                pyautogui.write(cantidad)
-                pyautogui.press('enter')
+                pyautogui.write(cantidad); pyautogui.press('enter')
                 time.sleep(0.4)
-                pyautogui.write(info_d)
-                pyautogui.press('enter') # Este enter lo deja en el SKU de abajo
+                pyautogui.write(info_d); pyautogui.press('enter')
             else:
-                # MODO U (Unidad)
-                # Escribimos u + cantidad pegados
-                pyautogui.write(f"u{cantidad}")
-                # UN SOLO ENTER: Confirma y PuTTY ya salta a la posición del siguiente SKU
-                pyautogui.press('enter')
+                # MODO U (Unidad normal)
+                pyautogui.write(f"u{cantidad}"); pyautogui.press('enter')
             
-            time.sleep(0.1) # Pausa mínima de estabilidad antes del próximo SKU
-            log_func(f"✅ Cargado: SKU {sku}")
+            time.sleep(0.1) 
+            log_func(f"✅ Cargado: {sku} ({cantidad})")
 
         except Exception as row_err:
-            log_func(f"❌ Error en fila {i+1}: {row_err}")
+            log_func(f"⚠️ Error en fila {i+1}: {row_err}")
             
         progress_func((i + 1) / total)
 
-    # 4. FINALIZACIÓN (Solo después de terminar todo el Excel)
-    log_func("💾 Todos los artículos cargados. Guardando...")
-    pyautogui.press('f5'); time.sleep(2.5)
+    # 4. CIERRE Y GUARDADO (TU SECUENCIA)
+    log_func("💾 Guardando cambios en PuTTY...")
+    pyautogui.press('f5'); time.sleep(3.0)
     
-    # Salida al menú principal
+    # Secuencia para volver al menú principal
     for k in ['end', 'enter', 'end', 'end']:
-        pyautogui.press(k)
-        time.sleep(0.5)
+        pyautogui.press(k); time.sleep(0.5)
 
-    log_func("🏁 Proceso finalizado con éxito.")
+    log_func("🏁 Proceso de Stock finalizado con éxito.")
+    return True

@@ -2,239 +2,217 @@ import customtkinter as ctk
 import pandas as pd
 import pyautogui
 import pygetwindow as gw
-import time
-import os
-import shutil
-import logging
-import sys
-import threading
+import time, os, shutil, sys, threading
 from tkinter import filedialog, messagebox
-from dotenv import load_dotenv, set_key
 
-# --- IMPORTACIÓN DE MÓDULOS DE ROBOTS ---
 from robots.Robot_Putty import ejecutar_stock
 from robots.ajuste import ejecutar_ajuste
 from robots.Cheques import ejecutar_cheques
 from robots.Precios_V2 import ejecutar_precios_v2
+from utils import etl_lpcio_a_excel, etl_ventas_a_excel, motor_bi_avanzado, generar_pdf_gestion
 
-# --- CONFIGURACIÓN DE RUTAS ---
-if getattr(sys, 'frozen', False):
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, 'frozen', False): BASE_DIR = os.path.dirname(sys.executable)
+else: BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-ENV_PATH = os.path.join(BASE_DIR, ".env")
-load_dotenv(ENV_PATH)
+PATH_PROCESADOS = os.path.join(BASE_DIR, "procesados")
+PATH_DASHBOARD = os.path.join(BASE_DIR, "Dashboard_Data")
+PATH_LISTAS = os.path.join(BASE_DIR, "listas_de_precios")
+for f in ["stock", "precios", "ajuste", "cheques"]: os.makedirs(os.path.join(PATH_PROCESADOS, f), exist_ok=True)
+os.makedirs(PATH_DASHBOARD, exist_ok=True)
+os.makedirs(PATH_LISTAS, exist_ok=True)
 
-# Rutas de carpetas automáticas
-PATH_PROCESADOS_RAIZ = os.path.join(BASE_DIR, "procesados")
-PATH_ENTRADA = os.path.join(BASE_DIR, "Excel_Entrada")
-
-# Configuración de Logging
-logging.basicConfig(
-    filename=os.path.join(BASE_DIR, "operaciones_rpa.log"),
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-
-pyautogui.FAILSAFE = True 
-
-def asegurar_carpetas():
-    """Crea la estructura de carpetas necesaria para la portabilidad."""
-    # Crear carpeta de entrada principal
-    if not os.path.exists(PATH_ENTRADA):
-        os.makedirs(PATH_ENTRADA, exist_ok=True)
-        
-    # Crear carpetas de salida (procesados)
-    for folder in ["stock", "precios", "ajuste", "cheques"]:
-        os.makedirs(os.path.join(PATH_PROCESADOS_RAIZ, folder), exist_ok=True)
-
-# Ejecutar la creación de entorno antes de iniciar la interfaz
-asegurar_carpetas()
-
-# --- CLASE DE LOGIN ---
-class LoginWindow(ctk.CTkFrame):
-    def __init__(self, master, login_callback):
-        super().__init__(master)
-        self.login_callback = login_callback
-        self.pack(pady=100, padx=100, fill="both", expand=True)
-
-        ctk.CTkLabel(self, text="🔐 Acceso PuTTY", font=("Arial", 24, "bold")).pack(pady=20)
-        
-        self.user_entry = ctk.CTkEntry(self, placeholder_text="Usuario", width=250)
-        self.user_entry.insert(0, os.getenv("USER_PUTTY", ""))
-        self.user_entry.pack(pady=10)
-        self.user_entry.bind("<Return>", lambda event: self.validar())
-
-        self.pass_entry = ctk.CTkEntry(self, placeholder_text="Contraseña", show="*", width=250)
-        self.pass_entry.pack(pady=10)
-        self.pass_entry.bind("<Return>", lambda event: self.validar())
-
-        ctk.CTkButton(self, text="INGRESAR", command=self.validar, fg_color="#3498db").pack(pady=20)
-
-    def validar(self):
-        u, p = self.user_entry.get(), self.pass_entry.get()
-        if u and p:
-            set_key(ENV_PATH, "USER_PUTTY", u)
-            self.login_callback(u, p)
-        else:
-            messagebox.showwarning("Error", "Ingrese sus credenciales")
-
-# --- CLASE PRINCIPAL ---
-class AndresRPASuite(ctk.CTk):
+class SuiteRPA(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Andrés Díaz | RPA Suite v5.0 PRO")
-        self.geometry("1100x800")
+        self.title("Retail Engine Suite v4.0 - Andrés Díaz")
+        self.geometry("950x700")
+        self.archivo_ruta = None
+        self.maestro_lpcio_excel = None # Almacena el LPCIO cargado en memoria
+        self.modo = "STOCK"
+        self.velocidad_tipeo = 0.05
         
-        ctk.set_appearance_mode("dark")
+        # APAGAMOS EL FRENO DE EMERGENCIA DEL MOUSE
+        pyautogui.FAILSAFE = False 
         
-        self.user_putty = None
-        self.pass_putty = None
-        self.velocidad_tipeo = 0.3
-        
-        self.login_screen = LoginWindow(self, self.iniciar_suite)
-
-    def iniciar_suite(self, user, password):
-        self.user_putty, self.pass_putty = user, password
-        self.login_screen.destroy()
         self.setup_ui()
 
     def setup_ui(self):
         self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(0, weight=1)
-
-        # Sidebar
-        self.sidebar = ctk.CTkFrame(self, width=240, corner_radius=0)
-        self.sidebar.grid(row=0, column=0, sticky="nsew")
         
-        ctk.CTkLabel(self.sidebar, text="🤖 CONTROL PANEL", font=("Arial", 20, "bold")).pack(pady=20)
+        # --- SIDEBAR: ROBOTS ---
+        self.sidebar = ctk.CTkFrame(self, width=220, corner_radius=0)
+        self.sidebar.grid(row=0, column=0, rowspan=6, sticky="nsew")
+        ctk.CTkLabel(self.sidebar, text="🤖 MÓDULOS RPA", font=("Arial", 16, "bold")).pack(pady=(20,10))
+        for m in ["STOCK", "PRECIOS", "AJUSTE", "CHEQUES"]:
+            ctk.CTkButton(self.sidebar, text=m, command=lambda x=m: self.set_modo(x)).pack(pady=5, padx=10)
+
+        # --- ÁREA CENTRAL: ETL Y BI ---
+        self.frame_bi = ctk.CTkFrame(self)
+        self.frame_bi.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
         
-        self.btn_st = ctk.CTkButton(self.sidebar, text="📦 Carga Stock", command=lambda: self.set_modo("STOCK"))
-        self.btn_st.pack(pady=8, padx=20, fill="x")
+        ctk.CTkLabel(self.frame_bi, text="ETAPA 1: ETL (Transformar CSV a Excel Limpio)", font=("Arial", 14, "bold"), text_color="#f39c12").pack(pady=5)
+        ctk.CTkButton(self.frame_bi, text="🧼 Convertir Maestro LPCIO", fg_color="#8e44ad", command=self.ejecutar_etl_lpcio).pack(pady=5)
+        ctk.CTkButton(self.frame_bi, text="🧼 Convertir Archivo(s) de Ventas", fg_color="#8e44ad", command=self.ejecutar_etl_ventas).pack(pady=5)
+
+        ctk.CTkLabel(self.frame_bi, text="ETAPA 2: Cargar Maestro en Memoria", font=("Arial", 14, "bold"), text_color="#3498db").pack(pady=(15,5))
+        self.btn_load_lpcio = ctk.CTkButton(self.frame_bi, text="📥 Cargar LPCIO (Excel)", fg_color="#2980b9", command=self.cargar_lpcio_memoria)
+        self.btn_load_lpcio.pack(pady=5)
+
+        ctk.CTkLabel(self.frame_bi, text="ETAPA 3: Análisis Forense por Períodos", font=("Arial", 14, "bold"), text_color="#2ecc71").pack(pady=(15,5))
+        frame_botones = ctk.CTkFrame(self.frame_bi, fg_color="transparent")
+        frame_botones.pack(pady=5)
+        ctk.CTkButton(frame_botones, text="📅 Diario (Máx 7)", width=120, fg_color="#16a085", command=lambda: self.lanzar_analisis("Diario", 7)).grid(row=0, column=0, padx=5)
+        ctk.CTkButton(frame_botones, text="📆 Semanal (Máx 4)", width=120, fg_color="#27ae60", command=lambda: self.lanzar_analisis("Semanal", 4)).grid(row=0, column=1, padx=5)
+        ctk.CTkButton(frame_botones, text="📊 Trimestral (Máx 3)", width=120, fg_color="#2ecc71", command=lambda: self.lanzar_analisis("Trimestral", 3)).grid(row=0, column=2, padx=5)
+        ctk.CTkButton(frame_botones, text="🌎 Anual (1 Arc.)", width=120, fg_color="#1abc9c", command=lambda: self.lanzar_analisis("Anual", 1)).grid(row=0, column=3, padx=5)
+
+        ctk.CTkLabel(self.frame_bi, text="ETAPA 4: Visualización", font=("Arial", 14, "bold"), text_color="#e74c3c").pack(pady=(15,5))
+        ctk.CTkButton(self.frame_bi, text="🚀 LANZAR DASHBOARDS SIMULTÁNEOS", fg_color="#c0392b", hover_color="#922b21", command=self.abrir_dashboard).pack(pady=5)
+
+        # --- LOG Y CONSOLA DE ROBOTS ---
+        self.txt_log = ctk.CTkTextbox(self, height=130)
+        self.txt_log.grid(row=1, column=1, padx=20, pady=5, sticky="nsew")
         
-        self.btn_pr = ctk.CTkButton(self.sidebar, text="💰 Precios (V2 Sensor)", command=lambda: self.set_modo("PRECIOS"))
-        self.btn_pr.pack(pady=8, padx=20, fill="x")
+        self.progress_bar = ctk.CTkProgressBar(self)
+        self.progress_bar.grid(row=2, column=1, padx=20, pady=5, sticky="ew")
+        self.progress_bar.set(0)
         
-        self.btn_aj = ctk.CTkButton(self.sidebar, text="🔧 Ajuste Stock", command=lambda: self.set_modo("AJUSTE"))
-        self.btn_aj.pack(pady=8, padx=20, fill="x")
-
-        self.btn_ch = ctk.CTkButton(self.sidebar, text="🎫 Cheques", command=lambda: self.set_modo("CHEQUES"))
-        self.btn_ch.pack(pady=8, padx=20, fill="x")
-
-        # Velocidad
-        ctk.CTkLabel(self.sidebar, text="⚡ Velocidad (ms)").pack(pady=(30, 0))
-        self.slider = ctk.CTkSlider(self.sidebar, from_=0.05, to=0.8, command=self.act_vel)
-        self.slider.set(0.3); self.slider.pack(pady=10, padx=20)
-        self.lbl_speed = ctk.CTkLabel(self.sidebar, text="0.30s"); self.lbl_speed.pack()
-
-        # Emergencia
-        ctk.CTkLabel(self.sidebar, text="🚨 EMERGENCIA:\nMouse a esquina SUP-IZQ", 
-                      text_color="#e74c3c", font=("Arial", 11, "bold")).pack(side="bottom", pady=20)
-
-        # Panel Central
-        self.main = ctk.CTkFrame(self, fg_color="transparent")
-        self.main.grid(row=0, column=1, padx=30, pady=30, sticky="nsew")
+        self.btn_file = ctk.CTkButton(self, text="📁 SELECCIONAR EXCEL PARA ROBOT", command=self.seleccionar_archivo, fg_color="#2c3e50")
+        self.btn_file.grid(row=3, column=1, padx=20, pady=5, sticky="ew")
         
-        self.lbl_archivo = ctk.CTkLabel(self.main, text="Seleccione un archivo Excel", font=("Arial", 14))
-        self.lbl_archivo.pack(pady=10)
-        
-        ctk.CTkButton(self.main, text="Buscar Excel", command=self.seleccionar_archivo).pack(pady=10)
+        self.btn_run = ctk.CTkButton(self, text="▶ INICIAR ROBOT RPA", command=self.run_thread, fg_color="#d35400", state="disabled")
+        self.btn_run.grid(row=4, column=1, padx=20, pady=10, sticky="ew")
 
-        self.progress_bar = ctk.CTkProgressBar(self.main, width=600)
-        self.progress_bar.set(0); self.progress_bar.pack(pady=20)
+    def log(self, msg): 
+        self.txt_log.insert("end", f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+        self.txt_log.see("end")
 
-        self.btn_run = ctk.CTkButton(self.main, text="🚀 INICIAR", state="disabled", fg_color="#2ecc71", command=self.confirmar_inicio)
-        self.btn_run.pack(pady=10)
-
-        self.console = ctk.CTkTextbox(self.main, height=300, font=("Consolas", 11))
-        self.console.insert("0.0", "--- SISTEMA RPA INICIADO ---\n")
-        self.console.pack(padx=20, pady=20, fill="both", expand=True)
-
-        self.modo, self.archivo_ruta = None, None
-
-    def act_vel(self, v):
-        self.velocidad_tipeo = float(v)
-        self.lbl_speed.configure(text=f"{v:.2f}s")
-
-    def log(self, txt):
-        msg = f"[{time.strftime('%H:%M:%S')}] {txt}"
-        self.console.insert("end", f"{msg}\n")
-        self.console.see("end")
-        logging.info(txt)
-
-    def seleccionar_archivo(self):
-        f = filedialog.askopenfilename(
-            initialdir=PATH_ENTRADA,
-            filetypes=[("Excel files", "*.xlsx")]
-        )
-        if f:
-            self.archivo_ruta = f
-            self.lbl_archivo.configure(text=os.path.basename(f), text_color="cyan")
-            if self.modo: self.btn_run.configure(state="normal")
-
-    def set_modo(self, m):
+    def set_modo(self, m): 
         self.modo = m
-        self.log(f"Módulo {m} seleccionado.")
-        if self.archivo_ruta: self.btn_run.configure(state="normal")
+        self.log(f"Modo RPA: {m}")
+    
+    # --- FLUJO ETL ---
+    def ejecutar_etl_lpcio(self):
+        arch = filedialog.askopenfilename(title="LPCIO Crudo", filetypes=[("CSV/TXT", "*.csv *.txt")])
+        if arch:
+            res = etl_lpcio_a_excel(arch, PATH_LISTAS)
+            if "Error" not in res: self.log(f"✅ LPCIO convertido a Excel. Verificalo en /listas_de_precios")
+            else: self.log(f"❌ {res}")
 
-    def confirmar_inicio(self):
-        respuesta = messagebox.askyesno("Confirmación de Seguridad", 
-                                        f"¿Estás seguro de que PuTTY está en el MENU INICIAL para iniciar {self.modo}?")
-        if respuesta:
-            self.lanzar_hilo()
-        else:
-            self.log("Proceso cancelado por el usuario.")
+    def ejecutar_etl_ventas(self):
+        archivos = filedialog.askopenfilenames(title="Ventas Crudas", filetypes=[("CSV/TXT", "*.csv *.txt")])
+        for arch in archivos:
+            res = etl_ventas_a_excel(arch, PATH_LISTAS)
+            if "Error" not in res: self.log(f"✅ Venta ETL OK: {os.path.basename(res)}")
+            else: self.log(f"❌ {res}")
 
-    def lanzar_hilo(self):
-        threading.Thread(target=self.ejecutar_robot, daemon=True).start()
+    def cargar_lpcio_memoria(self):
+        arch = filedialog.askopenfilename(title="Seleccionar LPCIO_ETL_Revisar.xlsx", filetypes=[("Excel", "*.xlsx")])
+        if arch:
+            self.maestro_lpcio_excel = arch
+            self.btn_load_lpcio.configure(text="✅ LPCIO CARGADO", fg_color="#27ae60")
+            self.log(f"🧠 Maestro de Ofertas en memoria: {os.path.basename(arch)}")
 
+    # --- FLUJO BI ---
+    def lanzar_analisis(self, tipo_analisis, max_archivos):
+        if not self.maestro_lpcio_excel:
+            messagebox.showerror("Error", "Primero debés Cargar el Maestro (Etapa 2).")
+            return
+
+        archivos_procesar = []
+        for i in range(1, max_archivos + 1):
+            msg = f"Seleccioná el archivo {i} de {max_archivos} (Dejar vacío para terminar)"
+            arch = filedialog.askopenfilename(title=msg, filetypes=[("Excel ETL", "*.xlsx")])
+            if not arch: break 
+            
+            etiqueta = ctk.CTkInputDialog(text=f"¿Qué etiqueta le ponemos al archivo {i}?\nEj: 'Día Lunes', 'Semana 1', 'Mes Enero'", title="Etiqueta").get_input()
+            if not etiqueta: etiqueta = f"Carga {i}"
+            
+            archivos_procesar.append({'ruta': arch, 'etiqueta': etiqueta})
+
+        if not archivos_procesar: return
+
+        self.log(f"⚙️ Procesando Análisis {tipo_analisis} con {len(archivos_procesar)} archivos...")
+        def tarea():
+            res = motor_bi_avanzado(archivos_procesar, self.maestro_lpcio_excel, PATH_DASHBOARD, tipo_analisis)
+            if res == "OK": 
+                self.log(f"✅ Base de datos {tipo_analisis} construida.")
+                messagebox.showinfo("Listo", "Datos preparados. Podés lanzar los Dashboards.")
+            else: self.log(f"❌ {res}")
+        threading.Thread(target=tarea, daemon=True).start()
+
+    def abrir_dashboard(self): 
+        threading.Thread(target=lambda: os.system(f'streamlit run "{os.path.join(BASE_DIR, "app_dashboard.py")}"'), daemon=True).start()
+
+    # =======================================================
+    # ENFOQUE DE PUTTY BLINDADO (LA SOLUCIÓN AL ERROR DE HOY)
+    # =======================================================
     def enfocar_putty(self):
-        ventanas = [w for w in gw.getAllWindows() if "PuTTY" in w.title]
-        if ventanas:
-            win = ventanas[0]
-            if win.isMinimized: win.restore()
-            win.activate()
-            return True
-        return False
+        try:
+            ventanas = [w for w in gw.getWindowsWithTitle('PuTTY') if 'PuTTY' in w.title]
+            if ventanas:
+                win = ventanas[0]
+                if win.isMinimized: 
+                    win.restore()
+                try:
+                    win.activate()
+                except:
+                    pass # Evita que Windows bloquee el comando activate()
+                
+                time.sleep(1) # Le damos 1 segundo a la PC para traer la ventana al frente
+                return True
+            return False
+        except Exception as e:
+            self.log(f"⚠️ Error al buscar la ventana: {e}")
+            return False
 
+    # --- FLUJO ROBOTS ---
+    def seleccionar_archivo(self):
+        self.archivo_ruta = filedialog.askopenfilename(initialdir=PATH_LISTAS, filetypes=[("Excel files", "*.xlsx *.xls")])
+        if self.archivo_ruta: 
+            self.btn_run.configure(state="normal")
+            self.log(f"Cargado RPA: {os.path.basename(self.archivo_ruta)}")
+
+    def run_thread(self): 
+        threading.Thread(target=self.ejecutar_robot, daemon=True).start()
+    
     def ejecutar_robot(self):
         self.btn_run.configure(state="disabled")
+        
+        # Validamos primero que PuTTY esté abierto y en foco
         if not self.enfocar_putty():
-            messagebox.showerror("Error", "No se detectó PuTTY."); self.btn_run.configure(state="normal"); return
-
+            self.log("❌ ERROR: No se encontró la ventana de PuTTY. Asegurate de tenerla abierta.")
+            self.btn_run.configure(state="normal")
+            return
+            
         try:
             df = pd.read_excel(self.archivo_ruta, header=None)
-            total = len(df)
-            self.log(f"Ejecutando {self.modo}...")
-
-            if self.modo == "STOCK":
-                ejecutar_stock(df, total, self.log, self.progress_bar.set, self.velocidad_tipeo)
-            elif self.modo == "PRECIOS":
-                # Aquí llamamos a la versión V2 con sensor para la prueba
-                ejecutar_precios_v2(df, total, self.log, self.progress_bar.set, self.velocidad_tipeo)
-            elif self.modo == "AJUSTE":
-                ejecutar_ajuste(df, total, self.log, self.progress_bar.set, self.velocidad_tipeo)
-            elif self.modo == "CHEQUES":
-                ejecutar_cheques(df, total, self.log, self.progress_bar.set, self.velocidad_tipeo)
-
-            # Mover archivo a procesados
-            dest_dir = os.path.join(PATH_PROCESADOS_RAIZ, self.modo.lower())
-            os.makedirs(dest_dir, exist_ok=True)
-            dest_path = os.path.join(dest_dir, os.path.basename(self.archivo_ruta))
+            total_filas = len(df)
+            args = (df, total_filas, self.log, self.progress_bar.set, self.velocidad_tipeo)
             
-            if os.path.exists(dest_path): os.remove(dest_path)
-            shutil.move(self.archivo_ruta, dest_path)
+            if self.modo == "STOCK": ejecutar_stock(*args)
+            elif self.modo == "PRECIOS": ejecutar_precios_v2(*args)
+            elif self.modo == "AJUSTE": ejecutar_ajuste(*args)
+            elif self.modo == "CHEQUES": ejecutar_cheques(*args)
             
-            messagebox.showinfo("RPA Suite", f"Proceso {self.modo} finalizado con éxito.")
-            self.log(f"✅ Archivo movido a: {dest_path}")
+            # --- FUNCIÓN AGREGADA: MOVER ARCHIVO A PROCESADOS ---
+            dest_folder = os.path.join(PATH_PROCESADOS, self.modo.lower())
+            dest_file = os.path.join(dest_folder, os.path.basename(self.archivo_ruta))
+            
+            if os.path.exists(dest_file):
+                os.remove(dest_file) # Si ya existe uno viejo con ese nombre, lo pisa
+                
+            shutil.move(self.archivo_ruta, dest_file)
+            self.archivo_ruta = None # Limpiamos la variable para evitar reprocesos accidentales
+            # ----------------------------------------------------
+            
+            self.log(f"✅ Módulo {self.modo} Terminado. Archivo movido.")
+        except Exception as e: 
+            self.log(f"❌ ERROR RPA: {e}")
+        finally: 
+            self.btn_run.configure(state="normal")
+            self.progress_bar.set(0)
 
-        except Exception as e:
-            self.log(f"❌ Error crítico: {e}")
-        
-        self.btn_run.configure(state="normal")
-        self.progress_bar.set(0)
-
-if __name__ == "__main__":
-    app = AndresRPASuite()
+if __name__ == "__main__": 
+    app = SuiteRPA()
     app.mainloop()
